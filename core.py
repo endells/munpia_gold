@@ -152,7 +152,7 @@ def response_error(payload, http_status=None):
     code = payload.get('code') if isinstance(payload, dict) else None
     code = code if isinstance(code, str) and re.fullmatch(r'[A-Z][0-9]{3}_[0-9]{5}', code) else '?'
     if code in ('A002_21014', 'A002_21015'):
-        return MunpiaError('문피아가 앱 전용 열람으로 제한한 회차입니다. 구매 여부와 별개로 현재 모바일 웹 다운로드 방식에서는 지원하지 않습니다. 쿠키를 다시 등록해도 해결되지 않습니다. (' + code + ')')
+        return MunpiaError('문피아 모바일 웹 API에서 본문을 제공하지 않는 회차입니다(앱 전용 안내 응답). PC 뷰어에서 열리더라도 현재 플러그인의 다운로드 방식은 지원하지 않습니다. 쿠키 재등록으로 해결되지 않습니다. (' + code + ')')
     if code in ('A001_11004', 'A002_21006'):
         return LoginRequired('문피아 로그인이 필요하거나 쿠키가 만료되었습니다. 설정에서 쿠키를 저장하고 로그인 확인 후 다시 실행하세요. (' + code + ')')
     suffix = ' HTTP %s' % http_status if http_status is not None else ''
