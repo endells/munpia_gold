@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.lock
+*.log
+*.epub
+downloads/
+.munpia_gold/
+cookies*
+munpia_gold_cookie.txt
+.env*
+.venv/
