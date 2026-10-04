@@ -1,6 +1,6 @@
 package_name: munpia_gold
 title: 문피아 구매·대여편 다운
 description: 무료·구매 완료·유효 대여 회차 TXT/EPUB 저장 (자동 결제 없음)
-version: 0.2.1
+version: 0.2.2
 developer: endells
 home: https://github.com/endells/munpia_gold
