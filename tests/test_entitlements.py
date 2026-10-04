@@ -16,6 +16,13 @@ def result(data):
 
 
 class EntitlementTests(unittest.TestCase):
+    def test_app_only_error_is_not_a_cookie_error(self):
+        for code in ('A002_21014', 'A002_21015'):
+            error = c.response_error({'code': code}, 400)
+            self.assertNotIsInstance(error, c.LoginRequired)
+            self.assertIn('앱 전용', str(error))
+            self.assertIn(code, str(error))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
