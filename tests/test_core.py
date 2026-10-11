@@ -150,6 +150,13 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.run_engine(self.engine())['status'], 'failed')
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_manual_selection_ignores_batch_limit(self):
+        self.conf['max_per_title'] = 1
+        state = self.run_engine(self.engine(), selected=['10', '20', '30'])
+        self.assertEqual(state['completed'], 2)
+        self.assertEqual(state['total'], 2)
+        self.assertFalse(any(p.endswith('/20') for p, q in self.calls))
+
     def test_limit_and_analysis(self):
         self.conf['max_per_title'] = 1
         engine = self.engine()

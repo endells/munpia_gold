@@ -640,8 +640,9 @@ class Engine:
                         skipped += 1
                         continue
                     candidates.append(item)
-                maximum = int(config['max_per_title'])
-                candidates = candidates[:maximum]
+                # Explicit manual selection is not capped by the automatic batch size.
+                if wanted is None:
+                    candidates = candidates[:int(config['max_per_title'])]
                 self.update(total=len(candidates), done=0, current_title=novel['title'], skipped=skipped)
                 folder = root / ('%s [%s]' % (safe_name(novel['title']), nid))
                 # Only plugin-created names are used; guard against symlink escapes too.
