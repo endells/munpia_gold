@@ -44,7 +44,7 @@ class AdapterTests(unittest.TestCase):
             def __init__(self, package, job_id, interval, target_function, description):
                 self.job_id, self.interval, self.target_function = job_id, interval, target_function
         cls.framework = types.ModuleType('framework')
-        cls.framework.F = types.SimpleNamespace(config={'path_data': cls.tmp.name}, scheduler=types.SimpleNamespace(
+        cls.framework.F = types.SimpleNamespace(app=cls.app, config={'path_data': cls.tmp.name}, scheduler=types.SimpleNamespace(
             is_include=lambda n: n in cls.jobs, add_job_instance=add_job_instance, remove_job=remove_job))
         cls.framework.Job = Job
         cls.old_framework = sys.modules.get('framework')
@@ -57,7 +57,7 @@ class AdapterTests(unittest.TestCase):
             def get_scheduler_name(self):
                 return self.P.package_name + '_' + self.name
             def get_scheduler_desc(self):
-                return '문피아 구매·대여 회차 수집'
+                return '문피아 무료 회차 수집'
         plugin.PluginModuleBase = Base
         sys.modules['plugin'] = plugin
         from munpia_gold.mod_basic import ModuleBasic
@@ -94,6 +94,33 @@ class AdapterTests(unittest.TestCase):
     def send(self, command, **kw):
         return self.client.post('/munpia_gold/ajax/basic/command',data={'command':command,'csrf_token':self.token,**kw})
 
+    def test_auto_title_management(self):
+        previous = dict(self.values)
+        engine = self.module._engine()
+        try:
+            self.values['titles'] = '987654'
+            engine.history.record('987654', {'id': 1, 'num': 1}, '관리 시험', 'completed')
+            with patch.object(engine, 'start') as start, patch.object(self.module, 'sync_schedule') as schedule:
+                rows = self.send('titles').get_json()['rows']
+                self.assertEqual(rows, [{'id': '987654', 'title': '관리 시험', 'completed': 1}])
+                self.assertEqual(self.send('run_title', arg1='987654').get_json()['ret'], 'success')
+                self.assertEqual(start.call_args.args[:2], ('download', ['987654']))
+                start.reset_mock()
+                self.assertEqual(self.send('remove_auto', arg1='987654').get_json()['ret'], 'success')
+                self.assertEqual(self.values['titles'], '')
+                self.assertEqual(len(engine.history.rows(nid='987654')), 1)
+                self.assertEqual(self.send('run_title', arg1='987654').get_json()['ret'], 'error')
+                start.assert_not_called()
+                schedule.assert_not_called()
+                self.values['titles'] = '\n'.join(str(n) for n in range(1, 101))
+                self.assertEqual(self.send('add_auto', arg1='101').get_json()['ret'], 'error')
+                self.assertEqual(len(self.values['titles'].splitlines()), 100)
+        finally:
+            with engine.history.connect() as db:
+                db.execute('DELETE FROM entries WHERE novel_id=?', ('987654',))
+            self.values.clear()
+            self.values.update(previous)
+
     def test_add_auto_preserves_settings_and_does_not_start_work(self):
         previous = dict(self.values)
         try:
@@ -115,15 +142,106 @@ class AdapterTests(unittest.TestCase):
             self.values.update(previous)
 
     def test_four_templates_render(self):
-        for page in ['setting','manual','status','history']:
+        for page in ['setting','integration','cookie','manual','status','history','log']:
             r = self.client.get('/munpia_gold/basic/'+page)
             self.assertEqual(r.status_code, 200)
             self.assertIn('문피아 구매·대여편 다운', r.get_data(as_text=True))
+
+    def test_separate_tabs_and_cookie_save_preserve_settings(self):
+        html = self.client.get('/munpia_gold/basic/setting').get_data(as_text=True)
+        self.assertIn('id="titles"', html)
+        self.assertNotIn('id="tg_token"', html)
+        self.assertNotIn('id="munpia_cookie"', html)
+        html = self.client.get('/munpia_gold/basic/integration').get_data(as_text=True)
+        self.assertIn('id="tg_token"', html)
+        self.assertIn('id="dc_url"', html)
+        import json
+        previous = dict(self.values)
+        with patch.object(self.module._engine(), 'start') as start, patch.object(self.module, 'sync_schedule') as schedule:
+            response = self.send('cookie_save', arg1=json.dumps({'cookie': 'session=synthetic-test'}))
+            self.assertTrue(response.json['cookie_saved'])
+            self.assertEqual(previous, self.values)
+            start.assert_not_called()
+            schedule.assert_not_called()
+        self.send('cookie_save', arg1=json.dumps({'clear_cookie': True}))
+
+    def test_discord_configuration_does_not_send_until_test_or_completion(self):
+        import json
+        with patch.object(self.module.discord, 'sender') as sender:
+            response = self.send('discord_save', arg1=json.dumps({'url': 'https://discord.com/api/webhooks/123456/TEST_ONLY', 'enabled': True}))
+            self.assertEqual(response.json['ret'], 'success')
+            sender.assert_not_called()
+            self.assertNotIn('TEST_ONLY', self.send('discord_settings').get_data(as_text=True))
+            self.assertEqual(self.send('discord_test').json['ret'], 'success')
+            sender.assert_called_once()
+            self.send('discord_save', arg1=json.dumps({'enabled': False, 'clear_url': True}))
+
+    def test_telegram_registration_schedule_and_secret_redaction(self):
+        import json
+        previous = dict(self.values)
+        token = '123456:' + 'A' * 30
+        try:
+            self.values['titles'] = '123'
+            with patch.object(self.module._engine(), 'start') as start:
+                response = self.send('telegram_save', arg1=json.dumps({'token': token, 'channel': '-100123', 'enabled': True}))
+                self.assertEqual(response.json['ret'], 'success')
+                self.assertNotIn(token, response.get_data(as_text=True))
+                self.assertIn('munpia_gold_basic_telegram', self.jobs)
+                self.assertFalse(self.registrations[-1][1])
+                self.assertEqual(self.module.telegram_append(['598028', '123', '598028']), ['598028'])
+                self.assertEqual(self.values['titles'], '123\n598028')
+                self.assertNotIn(token, self.send('telegram_settings').get_data(as_text=True))
+                def telegram_api(token_value, method, params):
+                    if method == 'getWebhookInfo':
+                        return {'url': ''}
+                    if method == 'getChat':
+                        return {'id': -100123, 'type': 'channel'}
+                    return [{'update_id': 9, 'channel_post': {'chat': {'id': -100123}, 'text': 'https://nlink.munpia.com/link/munpia/novel/456'}}]
+                with patch.object(self.module.telegram, 'api', side_effect=telegram_api):
+                    self.assertEqual(self.send('telegram_poll').json['ret'], 'success')
+                self.assertEqual(self.values['titles'], '123\n598028\n456')
+                stale = self.module.config()
+                stale.update(titles='123', titles_base='123')
+                self.assertEqual(self.send('save', arg1=json.dumps(stale)).json['ret'], 'error')
+                self.assertEqual(self.values['titles'], '123\n598028\n456')
+                start.assert_not_called()
+                self.send('telegram_save', arg1=json.dumps({'channel': '-100123', 'enabled': False, 'clear_token': True}))
+                self.assertNotIn('munpia_gold_basic_telegram', self.jobs)
+        finally:
+            self.values.clear()
+            self.values.update(previous)
 
     def test_csrf_and_status_history(self):
         self.assertEqual(self.client.post('/munpia_gold/ajax/basic/command',data={'command':'run'}).status_code,403)
         self.assertEqual(self.send('status').json['ret'],'success')
         self.assertEqual(self.send('history',arg1='1').json['rows'],[])
+
+    def test_telegram_interval_reschedules_without_immediate_run(self):
+        import json
+        job_id = 'munpia_gold_basic_telegram'
+        raw = {'token': '123456:' + 'A'*30, 'channel': '-100123', 'enabled': True, 'interval_minutes': 3}
+        try:
+            with patch.object(self.module, 'telegram_poll') as poll, patch.object(self.module._engine(), 'start') as start:
+                self.assertEqual(self.send('telegram_save', arg1=json.dumps(raw)).json['ret'], 'success')
+                first = self.registered_jobs[job_id]
+                self.assertEqual(first.interval, '3')
+                self.send('telegram_save', arg1=json.dumps(raw))
+                self.assertIs(self.registered_jobs[job_id], first)
+                raw['interval_minutes'] = 10
+                self.send('telegram_save', arg1=json.dumps(raw))
+                self.assertEqual(self.registered_jobs[job_id].interval, '10')
+                self.assertFalse(self.registrations[-1][1])
+                poll.assert_not_called()
+                start.assert_not_called()
+                self.jobs.discard(job_id)
+                self.module.sync_telegram_schedule()
+                self.assertEqual(self.registered_jobs[job_id].interval, '10')
+                raw['interval_minutes'] = 0
+                self.assertEqual(self.send('telegram_save', arg1=json.dumps(raw)).json['ret'], 'error')
+                self.assertEqual(self.module.telegram.settings()['interval_minutes'], 10)
+        finally:
+            raw.update(enabled=False, clear_token=True, interval_minutes=1)
+            self.send('telegram_save', arg1=json.dumps(raw))
 
     def test_settings_validation_and_schedule(self):
         import json
@@ -253,3 +371,4 @@ class AdapterTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

@@ -172,6 +172,11 @@ def parse_id(value):
     if re.fullmatch(r'[1-9][0-9]{0,14}', value):
         return value
     u = urllib.parse.urlsplit(value)
+    if (u.scheme in ('https', 'http') and u.hostname == 'nlink.munpia.com'
+            and not u.username and not u.password and not u.port):
+        match = re.fullmatch(r'/link/munpia/novel/([1-9][0-9]{0,14})/?', u.path)
+        if match:
+            return match.group(1)
     if u.scheme not in ('https', 'http') or u.hostname not in ('munpia.com', 'www.munpia.com', 'm.munpia.com') or u.username or u.password or u.port:
         raise MunpiaError('문피아 작품 URL 또는 숫자 작품 번호를 입력하세요.')
     m = re.fullmatch(r'/novel/(?:detail|viewer)/([1-9][0-9]*)(?:/[1-9][0-9]*)?/?', u.path)
@@ -384,9 +389,13 @@ class Client:
         self.access_grants = {key: value for key, value in self.access_grants.items() if key[0] != str(nid)}
         params = {'order': 'ENTRY_FIRST', 'bookmark': 'false'}
         found, seen, cursors = [], set(), set()
+        expected_total = None
         for _ in range(1000):
             checked_at = time.monotonic()
             d = self.get(path, params)
+            total = d.get('total')
+            if total is not None and int(total) >= 0 and expected_total is None:
+                expected_total = int(total)
             items = d.get('list')
             if not isinstance(items, list):
                 raise MunpiaError('회차 목록 형식이 변경되었습니다.')
@@ -399,7 +408,7 @@ class Client:
                     item = dict(item, _access_checked_at=checked_at)
                     found.append(item)
             if not d.get('next'):
-                if 'total' in d and len(found) != int(d['total']):
+                if expected_total is not None and len(found) != expected_total:
                     raise MunpiaError('전체 회차 수가 맞지 않습니다. 목록을 다시 분석하세요.')
                 self.access_grants.update({(str(nid), str(item['id'])): item for item in found})
                 return found
@@ -453,6 +462,35 @@ class History:
                 novel_id TEXT, entry_id TEXT, title TEXT, episode_title TEXT,
                 seq INTEGER, status TEXT, path TEXT, sha256 TEXT, error TEXT,
                 updated TEXT, PRIMARY KEY(novel_id,entry_id))''')
+            db.execute('CREATE TABLE IF NOT EXISTS recent_books (position INTEGER PRIMARY KEY AUTOINCREMENT, novel_id TEXT UNIQUE, title TEXT)')
+
+    def remember_book(self, nid, title):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO recent_books(novel_id,title) VALUES(?,?)', (str(nid), str(title)))
+            db.execute('DELETE FROM recent_books WHERE position NOT IN (SELECT position FROM recent_books ORDER BY position DESC LIMIT 5)')
+
+    def auto_books(self, ids):
+        rows = []
+        with self.connect() as db:
+            for nid in ids:
+                recent = db.execute('SELECT title FROM recent_books WHERE novel_id=?', (nid,)).fetchone()
+                entry = db.execute('SELECT title FROM entries WHERE novel_id=? ORDER BY updated DESC LIMIT 1', (nid,)).fetchone()
+                count = db.execute("SELECT COUNT(*) FROM entries WHERE novel_id=? AND status='completed'", (nid,)).fetchone()[0]
+                rows.append({'id': nid, 'title': recent['title'] if recent else entry['title'] if entry else '아직 확인하지 않은 작품', 'completed': count})
+        return rows
+
+    def recent_books(self):
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute('SELECT novel_id AS id,title FROM recent_books ORDER BY position DESC LIMIT 5')]
+            # Show existing downloaded books immediately after upgrading, too.
+            seen = {row['id'] for row in rows}
+            for row in db.execute('SELECT novel_id AS id,title,MAX(updated) FROM entries GROUP BY novel_id ORDER BY MAX(updated) DESC,novel_id LIMIT 10'):
+                if len(rows) >= 5:
+                    break
+                if row['id'] not in seen:
+                    rows.append({'id': row['id'], 'title': row['title']})
+                    seen.add(row['id'])
+            return rows
 
     @contextmanager
     def connect(self):
@@ -596,6 +634,7 @@ class Engine:
 
     def _run(self, kind, ids, config, selected, handle):
         completed = failed = skipped = 0
+        downloads = []
         login_required = False
         try:
             root = Path(config['download_path']).expanduser()
@@ -609,6 +648,7 @@ class Engine:
                 client.check()
                 self.update(message='작품 %s 목록을 확인합니다.' % nid)
                 novel = client.detail(nid)
+                self.history.remember_book(nid, novel['title'])
                 if novel.get('epub') is True:
                     raise MunpiaError('앱 전용 EPUB 상품은 지원하지 않습니다. 모바일 웹에서 본문이 열리는 연재 회차를 사용하세요.')
                 chapters = client.chapters(nid)
@@ -674,6 +714,8 @@ class Engine:
                         atomic_write(path, data)
                         self.history.record(nid, item, novel['title'], 'completed', path, hashlib.sha256(data).hexdigest())
                         completed += 1
+                        downloads.append({'novel_id': str(nid), 'title': novel['title'],
+                                          'no': item.get('num') or 0, 'episode_title': item.get('title', '')})
                     except Stopped:
                         raise
                     except AccessDenied:
@@ -711,4 +753,13 @@ class Engine:
         except Exception as exc:
             self.update(status='failed', message=str(exc), finished=now())
         finally:
-            handle.close()
+            try:
+                callback = config.get('on_finished')
+                if kind != 'analyze' and callable(callback):
+                    callback({'state': self.snapshot(), 'downloads': downloads,
+                              'source': config.get('run_source', '수동 다운로드' if selected is not None else '저장된 목록 다운로드')})
+            except Exception:
+                self.warn('결과 알림 처리 실패. 완료된 다운로드 파일은 유지됩니다.')
+            finally:
+                handle.close()
+

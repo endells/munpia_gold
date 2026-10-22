@@ -72,6 +72,17 @@ class EntitlementTests(unittest.TestCase):
         self.assertEqual(self.requested_ids(),['10','20','30'])
         self.assertEqual(state['skipped'],4)
 
+    def test_completion_summary_and_recent_books_preserve_paid_titles(self):
+        reports = []
+        self.conf['on_finished'] = reports.append
+        engine = self.engine()
+        self.run_engine(engine, selected=['20', '30'])
+        self.assertEqual([x['no'] for x in reports[0]['downloads']], [2, 3])
+        self.assertEqual(reports[0]['source'], '수동 다운로드')
+        self.assertEqual(engine.history.recent_books()[0]['id'], '1')
+        self.assertEqual(engine.history.auto_books(['1'])[0]['completed'], 2)
+        self.assertNotIn('remove_paid_title', self.conf)
+
     def test_selected_ids_cannot_grant_unpurchased_or_expired_access(self):
         self.run_engine(self.engine(),selected=['20','30','40','50','60','70'])
         self.assertEqual(self.requested_ids(),['20','30'])
@@ -152,3 +163,4 @@ class EntitlementTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

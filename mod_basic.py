@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import threading
 from pathlib import Path
 
 from flask import jsonify, render_template, session
@@ -8,6 +9,8 @@ from framework import F, Job
 from plugin import PluginModuleBase
 
 from .core import Client, Engine, MunpiaError, atomic_write, normalize_cookie, parse_id, title_ids
+from .telegram_feed import TelegramFeed
+from .notifications import ActivityLog, DiscordNotifier
 
 
 class ModuleBasic(PluginModuleBase):
@@ -22,12 +25,88 @@ class ModuleBasic(PluginModuleBase):
     def __init__(self, P):
         super().__init__(P, first_menu='setting', name='basic', scheduler_desc='문피아 구매·대여 회차 수집')
         self.engine = None
+        self.settings_lock = threading.RLock()
+        self.telegram = TelegramFeed(Path(F.config['path_data']) / 'db')
+        self.telegram_lock = threading.Lock()
+        self.activity = ActivityLog(Path(F.config['path_data']) / 'db' / 'munpia_gold_activity.db')
+        self.discord = DiscordNotifier(Path(F.config['path_data']) / 'db')
 
     def plugin_load(self):
         if not self.P.ModelSetting.get('download_path'):
             self.P.ModelSetting.set('download_path', os.path.join(F.config['path_data'], 'downloads', 'munpia_gold'))
         self._engine()
         self.sync_schedule(self.config())
+        self.sync_telegram_schedule()
+        if hasattr(self.P.logger, 'addHandler') and self.activity not in self.P.logger.handlers:
+            self.P.logger.addHandler(self.activity)
+        self.activity.add('INFO', '문피아 구매·대여편 다운 시작')
+
+    def download_finished(self, report):
+        state = report['state']
+        self.activity.add('ERROR' if state.get('failed') or state['status'] in ('failed', 'auth_required') else 'INFO',
+                          '%s: %s · 완료 %s · 실패 %s · 건너뜀 %s' % (report['source'], state['message'], state.get('completed', 0), state.get('failed', 0), state.get('skipped', 0)))
+        for item in report['downloads']:
+            self.activity.add('INFO', '%s [%s] / %s. %s 저장 완료' % (item['title'], item['novel_id'], item['no'], item['episode_title']))
+        if state.get('last_error'):
+            self.activity.add('ERROR', state['last_error'])
+        if state.get('last_warning'):
+            self.activity.add('WARNING', state['last_warning'])
+        try:
+            if self.discord.notify(report):
+                self.activity.add('INFO', 'Discord 다운로드 결과 알림 전송 완료')
+        except MunpiaError as exc:
+            self.activity.add('ERROR', str(exc))
+            self._engine().warn(str(exc))
+
+    def sync_telegram_schedule(self, previous_interval=None):
+        job_id = self.get_scheduler_name() + '_telegram'
+        conf = self.telegram.settings()
+        enabled = conf['enabled']
+        interval = conf['interval_minutes']
+        if not enabled:
+            if F.scheduler.is_include(job_id):
+                F.scheduler.remove_job(job_id)
+        elif (not F.scheduler.is_include(job_id)
+              or (previous_interval is not None and previous_interval != interval)):
+            if F.scheduler.is_include(job_id):
+                F.scheduler.remove_job(job_id)
+            job = Job(self.P.package_name, job_id, str(interval), self.telegram_poll, '문피아 텔레그램 링크 수신')
+            F.scheduler.add_job_instance(job, run=False)
+
+    def telegram_append(self, ids):
+        if not ids:
+            return []
+        with F.app.app_context(), self.settings_lock:
+            current = title_ids(self.P.ModelSetting.get('titles') or '')
+            added = [nid for nid in dict.fromkeys(ids) if nid not in current]
+            if len(current) + len(added) > 100:
+                raise MunpiaError('자동 수집 목록이 100개를 초과합니다. 목록 정리 후 다시 수신하세요.')
+            if added:
+                self.P.ModelSetting.set('titles', '\n'.join(current + added))
+                self.activity.add('INFO', '텔레그램 자동 목록 추가: ' + ', '.join(added))
+            return added
+
+    def telegram_poll(self):
+        import fcntl
+        if not self.telegram_lock.acquire(blocking=False):
+            return '다른 수신 작업이 진행 중입니다.'
+        try:
+            self.telegram.directory.mkdir(parents=True, exist_ok=True)
+            with open(self.telegram.directory / 'munpia_gold_telegram.lock', 'a') as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return '다른 수신 작업이 진행 중입니다.'
+                try:
+                    return self.telegram.poll(self.telegram_append)
+                except MunpiaError as exc:
+                    self.activity.add('ERROR', str(exc))
+                    state = self.telegram.state()
+                    state['message'] = str(exc)
+                    self.telegram.write_state(state)
+                    return str(exc)
+        finally:
+            self.telegram_lock.release()
 
     def sync_schedule(self, conf, previous_interval=None):
         job_id = self.get_scheduler_name()
@@ -69,6 +148,7 @@ class ModuleBasic(PluginModuleBase):
     def runtime_config(self):
         conf = self.config()
         conf['cookie'] = self.read_cookie()
+        conf['on_finished'] = self.download_finished
         return conf
 
     @staticmethod
@@ -101,7 +181,7 @@ class ModuleBasic(PluginModuleBase):
                 'basic_auto_start': flag('basic_auto_start')}
 
     def process_menu(self, page, req):
-        if page not in ('setting', 'manual', 'status', 'history'):
+        if page not in ('setting', 'integration', 'cookie', 'manual', 'status', 'history', 'log'):
             page = 'setting'
         token_key = 'munpia_gold_csrf'
         if token_key not in session:
@@ -122,7 +202,7 @@ class ModuleBasic(PluginModuleBase):
                     raise MunpiaError('로그인한 문피아의 쿠키를 먼저 입력하세요.')
                 logged_in = Client(cookie=cookie).login_status()
                 return jsonify(ret='success', authenticated=logged_in,
-                               msg='문피아 로그인 확인 완료. 새 쿠키를 입력했다면 설정 저장을 눌러 적용하세요.' if logged_in else '로그인되지 않았습니다. 문피아에 다시 로그인한 뒤 모바일 웹 요청의 Cookie 값을 복사하세요.')
+                               msg='문피아 로그인 확인 완료. 새 쿠키를 입력했다면 쿠키 저장을 눌러 적용하세요.' if logged_in else '로그인되지 않았습니다. 문피아에 다시 로그인한 뒤 모바일 웹 요청의 Cookie 값을 복사하세요.')
             if command == 'browse_path':
                 path = Path(os.path.normpath(str(arg1 or '/').strip() or '/'))
                 if not path.is_absolute():
@@ -135,22 +215,73 @@ class ModuleBasic(PluginModuleBase):
                     path = path.parent
                 return jsonify(ret='success', path=str(path))
             engine = self._engine()
+            if command == 'activity':
+                return jsonify(ret='success', rows=self.activity.rows())
+            if command == 'discord_settings':
+                return jsonify(ret='success', config=self.discord.public_settings())
+            if command == 'discord_save':
+                result = self.discord.save(json.loads(arg1 or '{}'))
+                return jsonify(ret='success', config=result, msg='문피아 알리미 설정을 저장했습니다.')
+            if command == 'discord_test':
+                self.discord.test()
+                self.activity.add('INFO', 'Discord 테스트 알림 전송 완료')
+                return jsonify(ret='success', msg='Discord 채널에 테스트 알림을 보냈습니다.')
+            if command == 'cookie_save':
+                raw = json.loads(arg1 or '{}')
+                cookie = normalize_cookie(raw.get('cookie', ''))
+                if raw.get('clear_cookie') is True:
+                    try:
+                        self.cookie_path().unlink()
+                    except FileNotFoundError:
+                        pass
+                elif cookie:
+                    atomic_write(self.cookie_path(), cookie.encode('utf-8'))
+                return jsonify(ret='success', cookie_saved=self.cookie_path().is_file(), msg='쿠키 설정을 저장했습니다.')
+            if command == 'telegram_settings':
+                return jsonify(ret='success', config=self.telegram.public_settings(), state=self.telegram.state()['message'])
+            if command == 'telegram_save':
+                with self.telegram_lock:
+                    previous_interval = self.telegram.settings()['interval_minutes']
+                    result = self.telegram.save(json.loads(arg1 or '{}'))
+                    self.sync_telegram_schedule(previous_interval)
+                return jsonify(ret='success', config=result, msg='텔레그램 설정 저장 완료. 수신 간격: %s분. 저장만으로 수신·다운로드를 시작하지 않습니다.' % result['interval_minutes'])
+            if command == 'telegram_check':
+                channel = self.telegram.check(self.telegram.settings())
+                return jsonify(ret='success', msg='채널 연결 확인: ' + channel + ' · 봇을 채널 관리자로 추가하고 새 링크를 게시하세요.')
+            if command == 'telegram_poll':
+                message = self.telegram_poll()
+                return jsonify(ret='success', msg=message, titles=self.P.ModelSetting.get('titles') or '')
             if command == 'status':
                 state = engine.snapshot()
                 state['scheduler_enabled'] = F.scheduler.is_include(self.get_scheduler_name())
                 return jsonify(ret='success', state=state)
+            if command == 'titles':
+                with self.settings_lock:
+                    titles = self.P.ModelSetting.get('titles') or ''
+                    rows = engine.history.auto_books(title_ids(titles))
+                return jsonify(ret='success', rows=rows, titles=titles)
+            if command == 'remove_auto':
+                nid = parse_id(arg1)
+                with self.settings_lock:
+                    current = title_ids(self.P.ModelSetting.get('titles') or '')
+                    self.P.ModelSetting.set('titles', '\n'.join(x for x in current if x != nid))
+                return jsonify(ret='success', msg='자동 수집 목록에서 제외했습니다. 기존 파일과 이력은 유지합니다. 실행 중인 작업에는 다음 실행부터 반영됩니다.')
+            if command == 'recent_books':
+                return jsonify(ret='success', rows=engine.history.recent_books())
             if command == 'history':
                 page = max(1, min(100000, int(arg1 or 1)))
                 rows = engine.history.rows(51, (page - 1) * 50)
                 return jsonify(ret='success', rows=rows[:50], more=len(rows) > 50, page=page)
             if command == 'add_auto':
                 nid = parse_id(arg1)
-                current = self.P.ModelSetting.get('titles') or ''
-                if nid in title_ids(current):
-                    return jsonify(ret='success', added=False, novel_id=nid,
-                                   msg='이미 자동 수집 목록에 등록된 작품입니다. (' + nid + ')')
-                updated = current.rstrip() + '\n' + nid if current.strip() else nid
-                self.P.ModelSetting.set('titles', updated)
+                with self.settings_lock:
+                    current = self.P.ModelSetting.get('titles') or ''
+                    if nid in title_ids(current):
+                        return jsonify(ret='success', added=False, novel_id=nid,
+                                       msg='이미 자동 수집 목록에 등록된 작품입니다. (' + nid + ')')
+                    updated = current.rstrip() + '\n' + nid if current.strip() else nid
+                    title_ids(updated)  # Enforce the same 100-title limit as settings and Telegram.
+                    self.P.ModelSetting.set('titles', updated)
                 # Only append the title: do not start work, enable or reset a schedule.
                 return jsonify(ret='success', added=True, novel_id=nid,
                                msg='자동 수집 목록에 저장했습니다. (' + nid + ') 즉시 다운로드하지 않으며 자동 수집 사용 여부와 예약은 기존 설정을 따릅니다.')
@@ -167,8 +298,13 @@ class ModuleBasic(PluginModuleBase):
                 elif cookie:
                     # Separate from FF's generic settings responses; atomic_write uses mode 0600.
                     atomic_write(self.cookie_path(), cookie.encode('utf-8'))
-                for key, value in conf.items():
-                    self.P.ModelSetting.set(key, str(value))
+                with self.settings_lock:
+                    for key, value in conf.items():
+                        if key == 'titles' and 'titles_base' in raw:
+                            latest = title_ids(self.P.ModelSetting.get('titles') or '')
+                            if latest != title_ids(raw['titles_base']):
+                                raise MunpiaError('자동 수집 목록이 다른 작업에서 변경되었습니다. 새로고침 후 설정을 저장하세요.')
+                        self.P.ModelSetting.set(key, str(value))
                 self.sync_schedule(conf, previous_interval)
                 return jsonify(ret='success', msg='설정을 저장했습니다.', cookie_saved=self.cookie_path().is_file())
             if command == 'analyze':
@@ -180,11 +316,19 @@ class ModuleBasic(PluginModuleBase):
                 if not isinstance(selected, list) or not selected or len(selected) > 10000 or any(not str(x).isdigit() for x in selected):
                     raise MunpiaError('다운로드할 회차를 선택하세요.')
                 engine.start('download', [nid], self.runtime_config(), selected=selected)
+            elif command == 'run_title':
+                nid = parse_id(arg1)
+                conf = self.runtime_config()
+                if nid not in title_ids(conf['titles']):
+                    raise MunpiaError('자동 수집 목록에 없는 작품입니다. 목록을 새로고침하세요.')
+                conf['run_source'] = '자동 수집 목록 · 작품별 지금 받기'
+                engine.start('download', [nid], conf)
             elif command == 'run':
                 conf = self.runtime_config()
                 engine.start('download', title_ids(conf['titles']), conf)
             elif command == 'refresh':
                 conf = self.runtime_config()
+                conf['run_source'] = '기존 파일 보완'
                 ids = [parse_id(arg1)] if arg1 else title_ids(conf['titles'])
                 engine.start('refresh', ids, conf)
             elif command == 'stop':
@@ -202,10 +346,17 @@ class ModuleBasic(PluginModuleBase):
     def scheduler_function(self):
         try:
             conf = self.runtime_config()
+            conf['run_source'] = '자동 수집'
             self._engine().start('download', title_ids(conf['titles']), conf)
         except Exception as exc:
-            self.P.logger.warning('문피아 무료 수집 시작 실패: %s', exc)
+            self.P.logger.warning('문피아 구매·대여 수집 시작 실패: %s', exc)
 
     def plugin_unload(self):
+        if hasattr(self.P.logger, 'removeHandler'):
+            self.P.logger.removeHandler(self.activity)
+        job_id = self.get_scheduler_name() + '_telegram'
+        if F.scheduler.is_include(job_id):
+            F.scheduler.remove_job(job_id)
         if self.engine:
             self.engine.cancel()
+
