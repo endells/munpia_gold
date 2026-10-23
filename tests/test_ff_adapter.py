@@ -94,6 +94,40 @@ class AdapterTests(unittest.TestCase):
     def send(self, command, **kw):
         return self.client.post('/munpia_gold/ajax/basic/command',data={'command':command,'csrf_token':self.token,**kw})
 
+    def test_free_settings_are_inherited_and_cannot_be_overwritten(self):
+        import json
+        from munpia_gold.shared_settings import publish_settings, settings_path
+        from munpia_gold.core import atomic_write
+        base = self.framework.F.config['path_data']
+        original = dict(self.values)
+        cookie = Path(base) / 'db' / 'munpia_free_cookie.txt'
+        conf = self.module.config()
+        conf.update(download_path=str(Path(base) / 'shared_books'), episode_digits=3)
+        try:
+            publish_settings(base, conf, atomic_write)
+            atomic_write(cookie, b'session=shared-synthetic')
+            self.assertEqual(self.module.config()['download_path'], conf['download_path'])
+            self.assertEqual(self.module.read_cookie(), 'session=shared-synthetic')
+            stale = self.module.config()
+            stale.update(download_path='/wrong', episode_digits=9)
+            with patch.object(self.module._engine(), 'start') as start:
+                self.assertEqual(self.send('save', arg1=json.dumps(stale)).json['ret'], 'success')
+                start.assert_not_called()
+            self.assertEqual(self.module.config()['episode_digits'], 3)
+            self.assertEqual(self.send('cookie_save', arg1=json.dumps({'clear_cookie': True})).json['ret'], 'error')
+            self.assertTrue(cookie.exists())
+            html = self.client.get('/munpia_gold/basic/cookie').get_data(as_text=True)
+            self.assertIn('무료판 로그인 쿠키 사용', html)
+            self.assertNotIn('id="munpia_cookie"', html)
+            conf['episode_digits'] = 4
+            publish_settings(base, conf, atomic_write)
+            self.assertEqual(self.module.runtime_config()['episode_digits'], 4)
+        finally:
+            settings_path(base).unlink(missing_ok=True)
+            cookie.unlink(missing_ok=True)
+            self.values.clear()
+            self.values.update(original)
+
     def test_auto_title_management(self):
         previous = dict(self.values)
         engine = self.module._engine()

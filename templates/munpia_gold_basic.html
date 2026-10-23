@@ -67,7 +67,7 @@
 .mf .mf-log{background:#0e1726;color:#e8eff9}.mf details{margin-top:12px}.mf summary{cursor:pointer;color:#d9ebff!important}.mf [hidden]{display:none!important}
 </style>
 <div class="mf">
-<h3 class="mf-title">문피아 구매·대여편 다운 <small class="mf-version">v0.3.0</small></h3>
+<h3 class="mf-title">문피아 구매·대여편 다운 <small class="mf-version">v0.3.1</small></h3>
 <section class="mf-status" aria-label="작업 상태">
 <div class="mf-status-head"><strong class="mf-status-heading">작업 상태</strong><span id="state" class="mf-status-state" role="status">확인 중</span><button id="stop" type="button" class="btn btn-sm btn-outline-danger mf-stop" title="중지해도 완료된 파일은 보존됩니다." disabled>중지</button></div>
 <div class="mf-status-meta"><span id="counts"></span><span id="schedule" class="mf-status-schedule"></span></div>
@@ -76,6 +76,7 @@
 </section>
 <p id="mf-message" role="status"></p>
 {% if page == 'setting' %}
+<div class="mf-note">{% if shared_settings %}다운로드 경로·파일명·회차 상한·요청 간격·EPUB·작가의 말은 무료판 설정을 그대로 따릅니다. <a href="/munpia_free/basic/setting">무료판 설정 열기</a>{% else %}무료판 공유 설정이 아직 없습니다. 무료판을 업데이트한 뒤 설정 저장을 누르면 자동으로 연결됩니다. 현재는 기존 유료판 설정을 사용합니다.{% endif %}<br>작품 목록·자동 실행 예약·텔레그램·알림은 각 판에서 관리합니다.</div>
 <div class="mf-card">
 <label for="titles">자동 수집할 작품</label><textarea id="titles" rows="5" placeholder="작품 주소 또는 번호를 한 줄에 하나씩">{{ config.titles }}</textarea><small>예: https://m.munpia.com/novel/detail/599040 · PC 주소도 사용할 수 있습니다.</small>
 <div class="mf-actions"><input id="add_title" type="text" placeholder="추가할 작품 주소 또는 번호" aria-label="추가할 작품"><button id="register_title" type="button" class="btn btn-primary">작품 추가</button><button id="refresh_titles" type="button" class="btn btn-outline-primary">목록 새로고침</button></div>
@@ -132,6 +133,7 @@
 <details class="mf-guide" open><summary>Discord 웹훅 만들기</summary><ol><li>알림을 받을 서버의 일반 텍스트 채널에서 채널 편집 → 연동(Integrations) → 웹훅(Webhooks)으로 이동합니다.</li><li>새 웹훅을 만들고 이름을 ‘문피아 알리미’로 지정한 뒤 웹훅 URL을 복사합니다. 웹훅 관리 권한이 필요합니다.</li><li>위 입력란에 URL을 붙여넣고 알림 사용을 켠 뒤 알림 설정 저장을 누릅니다.</li><li>테스트 알림 보내기를 눌러 해당 Discord 채널에서 확인합니다. 저장만으로 메시지를 보내지는 않습니다.</li></ol><small>웹훅 URL은 인증정보입니다. 이 설정에만 입력하세요. 포럼/미디어 채널 대신 일반 텍스트 채널을 사용하세요.</small></details>
 </div>
 {% elif page == 'cookie' %}
+{% if shared_settings %}<div class="mf-card"><h5>무료판 로그인 쿠키 사용</h5><p>{% if cookie_saved %}무료판에 저장된 쿠키를 사용합니다.{% else %}무료판에 로그인 쿠키를 저장해 주세요.{% endif %}</p><a class="btn btn-outline-primary" href="/munpia_free/basic/cookie">무료판 로그인 쿠키 설정 열기</a></div>{% else %}
 <details><summary>PC 구매 회차 이용 안내</summary><p >PC 구매 본문 처리에는 FF 컨테이너 내부 Node.js 18 이상이 필요합니다. 모바일에서 제한된 회차는 PC 경로로 자동 전환합니다. PC 삽화 회차는 아직 지원하지 않습니다.</p></details>
 <div class="mf-card">
 <label for="munpia_cookie">문피아 로그인 쿠키 (필수)</label>
@@ -144,6 +146,7 @@
 <details><summary>확장프로그램으로 쿠키 가져오기</summary><ol><li>Chrome에서 m.munpia.com에 로그인하고 작품 페이지를 여세요.</li><li>Cookie-Editor 등 사용 중인 쿠키 확장프로그램에서 현재 사이트 쿠키를 JSON 형식으로 내보내기/복사하세요.</li><li>처음의 [부터 마지막 ]까지 여러 줄 전체를 위 칸에 붙여넣으세요. 줄바꿈을 지울 필요가 없습니다.</li><li>로그인 확인 → 쿠키 저장을 누르세요.</li></ol><small>모바일 문피아에 적용되는 도메인·경로·만료 조건에 맞춰 사용합니다. www.munpia.com이나 nssl.munpia.com 전용 쿠키만 있으면 다시 모바일 페이지에서 내보내세요.</small><small>기존 방식도 가능: F12 → Network → 요청의 Headers → Request Headers → Cookie 값을 복사합니다. Set-Cookie는 사용하지 않습니다.</small><small>쿠키는 계정 인증정보입니다. 채팅이나 GitHub에 올리지 말고 FF 설정에만 입력하세요. 저장된 값은 화면에 다시 표시하지 않습니다.</small></details>
 <div class="mf-actions"><button id="cookie_save" type="button" class="btn btn-primary">쿠키 저장</button></div>
 <small>쿠키 저장은 작품 목록·자동 수집 예약을 변경하거나 다운로드를 시작하지 않습니다.</small></div>
+{% endif %}
 {% elif page == 'manual' %}
 <div class="mf-card"><label for="novel_url">작품 주소 또는 번호</label><input id="novel_url" type="text" placeholder="https://m.munpia.com/novel/detail/599040"><div class="mf-actions"><button id="analyze" class="btn btn-primary">회차 분석</button><button id="download" class="btn btn-success" disabled>선택 회차 받기</button><button id="add_auto" type="button" class="btn btn-outline-primary" title="분석한 작품을 설정 목록에 저장합니다. 즉시 다운로드하지 않습니다." disabled>자동 수집 목록에 추가</button><button id="refresh_one" class="btn btn-outline-primary">이 작품 기존 파일 보완</button></div><small>최근 작업한 작품 · 선택하면 작품 번호만 입력됩니다.</small><div id="recent_books" class="mf-actions mf-recent" aria-label="최근 작업한 작품 5개"></div><h5 id="book_title"></h5><label class="mf-check"><input id="select_all" type="checkbox"> 받을 수 있는 회차 전체 선택</label><div class="mf-scroll"><table><thead><tr><th>선택</th><th>번호</th><th>회차</th><th>상태</th></tr></thead><tbody id="episodes"></tbody></table></div></div>
 {% elif page == 'log' %}
@@ -162,6 +165,9 @@ var endpoint={{ ('/' + package_name + '/ajax/basic/command')|tojson }}, token={{
 var lastAnalysis='', novelId='', timer=null, historyPage=1, more=false;
 function el(id){return document.getElementById(id);}
 var titlesBase=el('titles')?el('titles').value:'';
+{% if shared_settings %}
+['download_path','episode_digits','max_per_title','request_delay','make_epub','include_author_comment','epub_line_height','epub_paragraph_gap','select_download_path'].forEach(function(id){if(el(id)){el(id).disabled=true;el(id).title='무료판 설정을 따릅니다.';}});
+{% endif %}
 function message(text,bad){el('mf-message').textContent=text||'';el('mf-message').className=bad?'mf-error':'';}
 async function post(command,a,b){
  var body=new URLSearchParams({command:command,csrf_token:token});

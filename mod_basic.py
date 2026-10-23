@@ -9,6 +9,7 @@ from framework import F, Job
 from plugin import PluginModuleBase
 
 from .core import Client, Engine, MunpiaError, atomic_write, normalize_cookie, parse_id, title_ids
+from .shared_settings import SHARED_KEYS, read_settings
 from .telegram_feed import TelegramFeed
 from .notifications import ActivityLog, DiscordNotifier
 
@@ -134,9 +135,14 @@ class ModuleBasic(PluginModuleBase):
         raw = {k: self.P.ModelSetting.get(k) or v for k, v in self.db_default.items()}
         if not raw['download_path']:
             raw['download_path'] = os.path.join(F.config['path_data'], 'downloads', 'munpia_gold')
+        shared = read_settings(F.config['path_data'])
+        if shared is not None:
+            raw.update(shared)
         return self.validate(raw)
 
     def cookie_path(self):
+        if read_settings(F.config['path_data']) is not None:
+            return Path(F.config['path_data']) / 'db' / 'munpia_free_cookie.txt'
         return Path(F.config['path_data']) / 'db' / 'munpia_gold_cookie.txt'
 
     def read_cookie(self):
@@ -188,7 +194,8 @@ class ModuleBasic(PluginModuleBase):
             session[token_key] = secrets.token_urlsafe(32)
         return render_template('munpia_gold_basic.html', page=page,
                                package_name=self.P.package_name, config=self.config(),
-                               csrf_token=session[token_key], cookie_saved=self.cookie_path().is_file())
+                               csrf_token=session[token_key], cookie_saved=self.cookie_path().is_file(),
+                               shared_settings=read_settings(F.config['path_data']) is not None)
 
     def process_command(self, command, arg1, arg2, arg3, req):
         try:
@@ -227,6 +234,8 @@ class ModuleBasic(PluginModuleBase):
                 self.activity.add('INFO', 'Discord 테스트 알림 전송 완료')
                 return jsonify(ret='success', msg='Discord 채널에 테스트 알림을 보냈습니다.')
             if command == 'cookie_save':
+                if read_settings(F.config['path_data']) is not None:
+                    raise MunpiaError('로그인 쿠키는 무료판의 로그인 쿠키 탭에서 저장하세요.')
                 raw = json.loads(arg1 or '{}')
                 cookie = normalize_cookie(raw.get('cookie', ''))
                 if raw.get('clear_cookie') is True:
@@ -287,6 +296,11 @@ class ModuleBasic(PluginModuleBase):
                                msg='자동 수집 목록에 저장했습니다. (' + nid + ') 즉시 다운로드하지 않으며 자동 수집 사용 여부와 예약은 기존 설정을 따릅니다.')
             if command == 'save':
                 raw = json.loads(arg1 or '{}')
+                shared = read_settings(F.config['path_data'])
+                if shared is not None:
+                    if raw.get('cookie') or raw.get('clear_cookie'):
+                        raise MunpiaError('로그인 쿠키는 무료판에서 변경하세요.')
+                    raw.update(shared)
                 conf = self.validate(raw)
                 previous_interval = self.config()['basic_interval']
                 cookie = normalize_cookie(raw.get('cookie', ''))
@@ -300,6 +314,8 @@ class ModuleBasic(PluginModuleBase):
                     atomic_write(self.cookie_path(), cookie.encode('utf-8'))
                 with self.settings_lock:
                     for key, value in conf.items():
+                        if shared is not None and key in SHARED_KEYS:
+                            continue
                         if key == 'titles' and 'titles_base' in raw:
                             latest = title_ids(self.P.ModelSetting.get('titles') or '')
                             if latest != title_ids(raw['titles_base']):
