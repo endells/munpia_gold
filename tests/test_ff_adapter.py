@@ -184,6 +184,11 @@ class AdapterTests(unittest.TestCase):
             html = self.client.get('/munpia_gold/basic/' + page).get_data(as_text=True)
             self.assertIn('class="mf-version">v' + version + '</small>', html)
 
+    def test_status_has_separate_refresh_log(self):
+        html = self.client.get('/munpia_gold/basic/status').get_data(as_text=True)
+        self.assertIn('id="refresh_work_log"', html)
+        self.assertIn("timeZone:'Asia/Seoul'", html)
+
     def test_four_templates_render(self):
         for page in ['setting','integration','cookie','manual','status','history','log']:
             r = self.client.get('/munpia_gold/basic/'+page)
@@ -414,4 +419,5 @@ class AdapterTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
 
