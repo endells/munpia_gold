@@ -719,8 +719,25 @@ class Engine:
             self.refresh_log.append({'time': now(), 'level': level, 'message': str(message)[:2000]})
             del self.refresh_log[:-1000]
 
+    def select_book_context(self, nid):
+        # Reset first so a failed lookup never borrows the previous novel's title.
+        self.update(error_title='')
+        rows = self.history.auto_books([str(nid)])
+        title = rows[0]['title'] if rows else ''
+        if title == '아직 확인하지 않은 작품':
+            title = ''
+        self.update(error_title=title)
+
+    def _error_with_title(self, message):
+        title = self.state.get('error_title', '')
+        if title and message and title not in str(message):
+            return str(message) + ' · 작품명: ' + title
+        return message
+
     def update(self, **values):
         with self.guard:
+            if values.get('last_error'):
+                values['last_error'] = self._error_with_title(values['last_error'])
             for key, level in (('message', 'INFO'), ('last_error', 'ERROR')):
                 if key in values and values[key] != self.state.get(key):
                     self._refresh_log_locked(values[key], level)
@@ -739,6 +756,7 @@ class Engine:
 
     def warn(self, message):
         with self.guard:
+            message = self._error_with_title(message)
             self.state['warnings'] = self.state.get('warnings', 0) + 1
             self.state['last_warning'] = message
             self._refresh_log_locked(message, 'WARNING')
@@ -829,6 +847,7 @@ class Engine:
                         raise Stopped()
                 for nid in original_ids:
                     check_local()
+                    self.select_book_context(nid)
                     self.update(message='작품 %s 기존 파일명을 정리합니다.' % nid)
                     try:
                         self.history.sync_peer(nid, root)
@@ -846,10 +865,12 @@ class Engine:
                 raise LoginRequired('구매·대여 상태 확인을 위해 로그인이 필요합니다. 설정에 문피아 쿠키를 저장하고 로그인 확인을 눌러주세요.')
             for nid in ids:
                 try:
+                    self.select_book_context(nid)
                     client.check()
                     self.update(message='작품 %s 목록을 확인합니다.' % nid)
                     try:
                         novel = client.detail(nid)
+                        self.update(error_title=novel['title'])
                     except LoginRequired:
                         raise
                     except NovelUnavailable as exc:
