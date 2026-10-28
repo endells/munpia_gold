@@ -52,6 +52,20 @@ class PCTests(unittest.TestCase):
             self.assertEqual(client.entry('1','2')[1],'synthetic')
             fallback.assert_called_once_with(client,'1','2')
 
+    def test_pc_attachment_does_not_block_text(self):
+        attachment = {'id': 'image1', 'imageUrl': 'https://cdn1.munpia.com/test.png'}
+        info = {'login': True, 'novel': {'id': 1}, 'entry': {'id': 2, 'attachments': [attachment]}}
+        with patch.object(p, 'request', side_effect=[info, {'timestamp': 123}, b'fixture']), \
+             patch.object(p, 'parse_frames', return_value=('server', ['chunk'])), \
+             patch.object(p, 'Runtime') as runtime:
+            runtime.return_value.command.side_effect = [
+                {'publicKey': 'key', 'salt': 'salt', 'signature': 'signature'}, {'content': 'Synthetic text'}]
+            entry, text = p.entry(c.Client(), '1', '2')
+            self.assertEqual(text, 'Synthetic text')
+            self.assertEqual(entry['attachments'], [attachment])
+            self.assertEqual(entry['_source'], 'pc')
+            runtime.return_value.close.assert_called_once()
+
     def test_missing_node_is_actionable(self):
         with patch.object(p.shutil,'which',return_value=None):
             with self.assertRaisesRegex(c.MunpiaError,'Node.js 18'):
@@ -72,3 +86,4 @@ class PCTests(unittest.TestCase):
         self.assertEqual(req.get_method(),'GET')
 
 if __name__=='__main__':unittest.main()
+

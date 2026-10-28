@@ -193,9 +193,6 @@ def entry(client, nid, eid):
     meta = info.get('entry') or {}
     if str(meta.get('id')) != str(eid) or str((info.get('novel') or {}).get('id')) != str(nid):
         raise MunpiaError('PC 작품/회차 정보가 일치하지 않습니다.')
-    # Do not silently omit protected-renderer image placement in this initial adapter.
-    if meta.get('attachments') or info.get('attachments'):
-        raise MunpiaError('PC 본문의 삽화 배치는 아직 지원하지 않습니다. 누락 방지를 위해 이 회차를 저장하지 않았습니다.')
     runtime = Runtime(client)
     try:
         stamp = request(client, nid, eid, '/api/v1/pc/novel-detail/entry-timestamp').get('timestamp')
@@ -214,6 +211,10 @@ def entry(client, nid, eid):
         content = result.get('content')
         if not isinstance(content, str) or not content.strip():
             raise MunpiaError('PC 본문이 비어 있어 저장하지 않았습니다.')
-        return dict(meta, content=content, attachments=[], _source='pc'), content
+        attachments = meta.get('attachments') or info.get('attachments') or []
+        if not isinstance(attachments, list):
+            attachments = [attachments] if isinstance(attachments, dict) else [{'imageUrl': ''}]
+        return dict(meta, content=content, attachments=attachments, _source='pc'), content
     finally:
         runtime.close()
+
